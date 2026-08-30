@@ -1,0 +1,6 @@
+modules = ["python-3.11"]
+
+[nix]
+channel = "stable-25_05"
+
+run = "export WATCHED_WALLET=\"4zNLjg1Tfsgtc3KzTanA944YV1MBDQaQeQdnFnhvhW8v\" && export PORT=8080 && python pump_copy_trader.py --record trades.jsonl"
