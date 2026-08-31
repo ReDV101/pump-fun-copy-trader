@@ -1,3 +1,4 @@
+
 import os
 import time
 import requests
@@ -16,32 +17,49 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
-# Αρχικοποίηση Gemini Client
+# Αρχικοποίηση Gemini AI Client
 ai_client = None
 if GEMINI_API_KEY:
-    ai_client = genai.Client(api_key=GEMINI_API_KEY)
+    try:
+        ai_client = genai.Client(api_key=GEMINI_API_KEY)
+        print("Gemini AI Client initialized successfully!")
+    except Exception as e:
+        print(f"Gemini Init Error: {e}")
 
 @app.route('/')
 def home():
-    return "Pump.fun Copy Trader & AI Assistant is Running!", 200
+    return "Pump.fun Copy Trader & AI Assistant is Running 24/7!", 200
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
-        requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=10)
+        return res.json()
     except Exception as e:
         print(f"Error sending Telegram message: {e}")
+        return None
 
-# 1. AI ASSISTANT (Telegram Messages)
+# -------------------------------------------------------------
+# 1. AI ASSISTANT THREAD (Telegram Long-Polling)
+# -------------------------------------------------------------
 def handle_telegram_updates():
-    """Ακούει τα μηνύματα που στέλνεις στο Bot και απαντάει με AI"""
+    # Καθαρισμός τυχόν Webhook conflict για να δουλέψει το getUpdates
+    try:
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=10)
+        print("Cleared Telegram Webhooks successfully.")
+    except Exception as e:
+        print(f"Webhook reset warning: {e}")
+
     last_update_id = 0
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     
+    print("Telegram Listener loop active...")
     while True:
         try:
-            response = requests.get(url, params={"offset": last_update_id + 1, "timeout": 20}, timeout=25)
+            params = {"offset": last_update_id + 1, "timeout": 20}
+            response = requests.get(url, params=params, timeout=25)
+            
             if response.status_code == 200:
                 data = response.json()
                 for update in data.get("result", []):
@@ -50,27 +68,33 @@ def handle_telegram_updates():
                     text = message.get("text", "")
                     sender_id = str(message.get("chat", {}).get("id", ""))
 
-                    # Απαντάει μόνο σε εσένα (ασφάλεια)
+                    # Απάντηση ΜΟΝΟ στον δικό σου λογαριασμό Telegram για ασφάλεια
                     if sender_id == str(TELEGRAM_CHAT_ID) and text:
-                        if text.startswith("/start"):
-                            send_telegram_message("Γεια σου! Είμαι ο προσωπικός σου AI βοηθός και ταυτόχρονα παρακολουθώ το Pump.fun wallet σου!")
+                        if text == "/start":
+                            send_telegram_message("🤖 <b>AI Assistant Online!</b>\nΕίμαι έτοιμος! Στείλε μου οποιαδήποτε ερώτηση.")
                         elif ai_client:
-                            # Παραγωγή απάντησης από το Gemini AI
                             try:
-                                ai_response = ai_client.models.generate_content(
+                                print(f"Processing AI Query: {text}")
+                                response_ai = ai_client.models.generate_content(
                                     model='gemini-2.5-flash',
                                     contents=text,
                                 )
-                                send_telegram_message(ai_response.text)
+                                send_telegram_message(response_ai.text)
                             except Exception as ai_err:
-                                send_telegram_message(f"Σφάλμα AI: {ai_err}")
+                                print(f"AI Generation Error: {ai_err}")
+                                send_telegram_message(f"⚠️ Σφάλμα AI: {ai_err}")
                         else:
-                            send_telegram_message("Το GEMINI_API_KEY δεν έχει οριστεί στο Render.")
+                            send_telegram_message("⚠️ Το GEMINI_API_KEY δεν βρέθηκε στο Render!")
+            else:
+                print(f"Telegram API Status Code: {response.status_code}")
         except Exception as e:
             print(f"Telegram listener error: {e}")
+        
         time.sleep(1)
 
-# 2. PUMP.FUN MONITOR (HTTP Polling)
+# -------------------------------------------------------------
+# 2. PUMP.FUN TRADES MONITOR THREAD (Free HTTP Polling)
+# -------------------------------------------------------------
 def get_latest_transactions(last_signature):
     url = f"https://api.helius.xyz/v0/addresses/{WATCHED_WALLET}/transactions?api-key={HELIUS_API_KEY}"
     try:
@@ -109,7 +133,7 @@ def get_latest_transactions(last_signature):
 
 def poll_blockchain():
     print("Starting Free Polling Service...")
-    send_telegram_message(f"🚀 <b>Bot Active:</b> AI Assistant & Pump.fun Monitoring Enabled!\n<code>{WATCHED_WALLET}</code>")
+    send_telegram_message(f"🚀 <b>System Active:</b> AI Assistant & Pump.fun Watcher Ready!\n<code>{WATCHED_WALLET}</code>")
     last_signature = None
     last_signature = get_latest_transactions(last_signature)
     
@@ -117,22 +141,28 @@ def poll_blockchain():
         try:
             last_signature = get_latest_transactions(last_signature)
         except Exception as e:
-            print(f"Error in loop: {e}")
+            print(f"Error in polling loop: {e}")
         time.sleep(3)
 
+# -------------------------------------------------------------
+# MAIN SERVER LAUNCH
+# -------------------------------------------------------------
 def run_flask():
-    app.run(host='0.0.0.0', port=10000)
+    # Παίρνουμε το PORT δυναμικά από το Render (default 10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    # 1. Thread για το Pump.fun Monitoring
+    # 1. Thread για Blockchain Monitoring
     t_pump = Thread(target=poll_blockchain)
     t_pump.daemon = True
     t_pump.start()
     
-    # 2. Thread για τον AI Assistant στο Telegram
+    # 2. Thread για Telegram AI Assistant
     t_ai = Thread(target=handle_telegram_updates)
     t_ai.daemon = True
     t_ai.start()
     
-    # 3. Web Server για το Render
+    # 3. Web Server
     run_flask()
+was
