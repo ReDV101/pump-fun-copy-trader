@@ -1,29 +1,4 @@
-requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=10)
-        print("Cleared Telegram Webhooks successfully.")
-    except Exception as e:
-        print(f"Webhook reset warning: {e}")
-
-    last_update_id = 0
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-    
-    print("Telegram Listener loop active...")
-    while True:
-        try:
-            params = {"offset": last_update_id + 1, "timeout": 20}
-            response = requests.get(url, params=params, timeout=25)
-            
-            if response.status_code == 200:
-                data = response.json()
-                for update in data.get("result", []):
-                    last_update_id = update["update_id"]
-                    message = update.get("message", {})
-                    text = message.get("text", "")
-                    sender_id = str(message.get("chat", {}).get("id", ""))
-
-                    # Απάντηση ΜΟΝΟ στον δικό σου λογαριασμό Telegram για ασφάλεια
-                    if sender_id == str(TELEGRAM_CHAT_ID) and text:
-                        if text == "/start":
-                            send_telegram_message("🤖 <b>AI Assistant Online!</b>\nΕίμαι έτοιμος! Στείλε μου οποιαδήποτε ερώτηση.")
+telegram_message("🤖 <b>AI Assistant Online!</b>\nΕίμαι έτοιμος! Στείλε μου οποιαδήποτε ερώτηση.")
                         elif ai_client:
                             try:
                                 print(f"Processing AI Query: {text}")
