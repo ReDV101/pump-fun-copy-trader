@@ -1,0 +1,89 @@
+import os
+import time
+import requests
+from flask import Flask
+from threading import Thread
+from google import genai
+
+app = Flask(__name__)
+
+# ------------------------------------------------------------------
+# 1. ΣΤΑΘΕΡΕΣ & ΜΕΤΑΒΛΗΤΕΣ ΠΕΡΙΒΑΛΛΟΝΤΟΣ
+# ------------------------------------------------------------------
+BOT_TOKEN = "8980136547:AAEI57YqbqhJWXESr_KNIUprMZ8cYBvZBc"
+TELEGRAM_BOT_TOKEN = BOT_TOKEN
+
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+WATCHED_WALLET = os.getenv("WATCHED_WALLET")
+TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+
+# ------------------------------------------------------------------
+# 2. GEMINI AI CLIENT INITIALIZATION
+# ------------------------------------------------------------------
+ai_client = None
+if GEMINI_API_KEY:
+    try:
+        ai_client = genai.Client(api_key=GEMINI_API_KEY)
+        print("Gemini AI Client initialized successfully!")
+    except Exception as e:
+        print(f"Gemini Init Error: {e}")
+
+# ------------------------------------------------------------------
+# 3. FLASK WEB SERVER
+# ------------------------------------------------------------------
+@app.route('/')
+def home():
+    return "Pump.fun Copy Trader & AI Assistant is Running 24/7!", 200
+
+# ------------------------------------------------------------------
+# 4. TELEGRAM FUNCTIONS
+# ------------------------------------------------------------------
+def clear_telegram_webhooks():
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            print("Cleared Telegram Webhooks successfully.")
+        else:
+            print(f"Webhook Clear Status Code: {res.status_code}")
+    except Exception as e:
+        print(f"Webhook reset warning: {e}")
+
+def start_polling():
+    clear_telegram_webhooks()
+    last_update_id = 0
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    print("Telegram Listener loop active...")
+    
+    while True:
+        try:
+            params = {"offset": last_update_id + 1, "timeout": 20}
+            response = requests.get(url, params=params, timeout=25)
+            
+            if response.status_code == 200:
+                data = response.json()
+                for update in data.get("result", []):
+                    last_update_id = update["update_id"]
+                    message = update.get("message", {})
+                    text = message.get("text", "")
+                    sender_id = str(message.get("chat", {}).get("id", ""))
+                    
+                    if TELEGRAM_CHAT_ID and sender_id == str(TELEGRAM_CHAT_ID) and text:
+                        if text == "/start":
+                            print("Bot received /start command!")
+            else:
+                print(f"Telegram API Status Code: {response.status_code}")
+        except Exception as e:
+            pass
+        time.sleep(2)
+
+# ------------------------------------------------------------------
+# 5. MAIN EXECUTION ENTRY POINT
+# ------------------------------------------------------------------
+if __name__ == "__main__":
+    Thread(target=start_polling, daemon=True).start()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
