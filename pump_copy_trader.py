@@ -1,27 +1,5 @@
-import os
-import time
-import requests
-from flask import Flask
-from threading import Thread
-from google import genai
-
-app = Flask(__name__)
-
-# Μεταβλητές Περιβάλλοντος
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
-WATCHED_WALLET = os.getenv("WATCHED_WALLET")
-TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-
-# Αρχικοποίηση Gemini AI Client
-ai_client = None
-if GEMINI_API_KEY:
-    try:
-        ai_client = genai.Client(api_key=GEMINI_API_KEY)
-        print("Gemini AI Client initialized successfully!")
+s
+i AI Client initialized successfully!")
     except Exception as e:
         print(f"Gemini Init Error: {e}")
 
