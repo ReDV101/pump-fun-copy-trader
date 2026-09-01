@@ -1,29 +1,4 @@
-s
-i AI Client initialized successfully!")
-    except Exception as e:
-        print(f"Gemini Init Error: {e}")
-
-@app.route('/')
-def home():
-    return "Pump.fun Copy Trader & AI Assistant is Running 24/7!", 200
-
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-    try:
-        res = requests.post(url, json=payload, timeout=10)
-        return res.json()
-    except Exception as e:
-        print(f"Error sending Telegram message: {e}")
-        return None
-
-# -------------------------------------------------------------
-# 1. AI ASSISTANT THREAD (Telegram Long-Polling)
-# -------------------------------------------------------------
-def handle_telegram_updates():
-    # Καθαρισμός τυχόν Webhook conflict για να δουλέψει το getUpdates
-    try:
-        requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=10)
+requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=10)
         print("Cleared Telegram Webhooks successfully.")
     except Exception as e:
         print(f"Webhook reset warning: {e}")
@@ -143,4 +118,5 @@ if __name__ == "__main__":
     # 3. Web Server
     run_flask()
 was
+        
 
