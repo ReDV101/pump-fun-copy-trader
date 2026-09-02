@@ -1,0 +1,362 @@
+import os
+import time
+import json
+import threading
+import requests
+from flask import Flask
+from threading import Thread, Lock
+from google import genai
+
+app = Flask(__name__)
+
+# ------------------------------------------------------------------
+# 1. ENVIRONMENT VARIABLES (ΟΛΑ μπαίνουν στο Railway -> Variables,
+#    ΠΟΤΕ hardcoded μέσα στον κώδικα)
+# ------------------------------------------------------------------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+WATCHED_WALLET = os.getenv("WATCHED_WALLET")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Ρυθμίσεις paper trading (προαιρετικές, έχουν default τιμές)
+STARTING_BALANCE_SOL = float(os.getenv("STARTING_BALANCE_SOL", "10"))
+PAPER_TRADE_SOL = float(os.getenv("PAPER_TRADE_SOL", "0.5"))  # πόσο SOL "επενδύει" το paper account σε κάθε copy-trade
+
+PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+STATE_FILE = "paper_state.json"
+
+state_lock = Lock()
+
+# ------------------------------------------------------------------
+# 2. PAPER TRADING STATE (κρατάει το virtual χαρτοφυλάκιο)
+# ------------------------------------------------------------------
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "balance_sol": STARTING_BALANCE_SOL,
+        "positions": {},       # mint -> {"amount": tokens, "avg_price_sol": price}
+        "closed_trades": [],   # ιστορικό κλειστών θέσεων
+        "last_signature": None,
+    }
+
+def save_state():
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+state = load_state()
+
+# ------------------------------------------------------------------
+# 3. GEMINI AI CLIENT
+# ------------------------------------------------------------------
+ai_client = None
+if GEMINI_API_KEY:
+    try:
+        ai_client = genai.Client(api_key=GEMINI_API_KEY)
+        print("Gemini AI Client initialized successfully!")
+    except Exception as e:
+        print(f"Gemini Init Error: {e}")
+
+# ------------------------------------------------------------------
+# 4. FLASK (health check για Railway)
+# ------------------------------------------------------------------
+@app.route('/')
+def home():
+    return "Pump.fun Paper Copy-Trader is Running!", 200
+
+# ------------------------------------------------------------------
+# 5. TELEGRAM HELPERS
+# ------------------------------------------------------------------
+def send_telegram_message(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[No Telegram configured] {text}")
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML"
+        }, timeout=10)
+    except Exception as e:
+        print(f"Telegram send error: {e}")
+
+def clear_telegram_webhooks():
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True"
+        res = requests.get(url, timeout=10)
+        print("Cleared Telegram Webhooks." if res.status_code == 200 else f"Webhook clear status: {res.status_code}")
+    except Exception as e:
+        print(f"Webhook reset warning: {e}")
+
+def short_mint(mint):
+    return f"{mint[:4]}...{mint[-4:]}" if mint and len(mint) > 8 else mint
+
+# ------------------------------------------------------------------
+# 6. ΤΙΜΗ TOKEN (best-effort, μέσω DexScreener - δωρεάν, χωρίς key)
+# ------------------------------------------------------------------
+def get_current_price_sol(mint):
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            pairs = res.json().get("pairs") or []
+            for p in pairs:
+                if p.get("chainId") == "solana" and p.get("priceNative"):
+                    return float(p["priceNative"])
+    except Exception as e:
+        print(f"Price fetch error: {e}")
+    return None
+
+# ------------------------------------------------------------------
+# 7. PAPER TRADING LOGIC
+# ------------------------------------------------------------------
+def paper_buy(mint, wallet_token_amount, wallet_sol_spent, signature):
+    if not wallet_token_amount or not wallet_sol_spent:
+        return
+    with state_lock:
+        if state["balance_sol"] < PAPER_TRADE_SOL:
+            send_telegram_message(f"⚠️ Ανεπαρκές virtual balance για copy-buy σε {short_mint(mint)}")
+            return
+        price_per_token = wallet_sol_spent / wallet_token_amount
+        tokens_bought = PAPER_TRADE_SOL / price_per_token
+
+        pos = state["positions"].get(mint, {"amount": 0.0, "avg_price_sol": 0.0})
+        cost_before = pos["amount"] * pos["avg_price_sol"]
+        new_amount = pos["amount"] + tokens_bought
+        new_avg_price = (cost_before + PAPER_TRADE_SOL) / new_amount
+
+        state["positions"][mint] = {"amount": new_amount, "avg_price_sol": new_avg_price}
+        state["balance_sol"] -= PAPER_TRADE_SOL
+        save_state()
+
+    send_telegram_message(
+        f"🟢 <b>PAPER BUY</b>\n"
+        f"Token: <code>{short_mint(mint)}</code>\n"
+        f"Ποσό: {PAPER_TRADE_SOL:.3f} SOL\n"
+        f"Τιμή εισόδου: {price_per_token:.8f} SOL/token\n"
+        f"Balance: {state['balance_sol']:.3f} SOL\n"
+        f"Tx: <code>{signature}</code>"
+    )
+
+def paper_sell(mint, wallet_token_amount, wallet_sol_received, signature):
+    with state_lock:
+        pos = state["positions"].get(mint)
+        if not pos or pos["amount"] <= 0:
+            return  # δεν κρατάμε αυτό το token στο paper account, αγνόησέ το
+
+        sell_price = (wallet_sol_received / wallet_token_amount) if wallet_token_amount else pos["avg_price_sol"]
+        proceeds = pos["amount"] * sell_price
+        cost_basis = pos["amount"] * pos["avg_price_sol"]
+        pnl = proceeds - cost_basis
+        pnl_pct = (pnl / cost_basis * 100) if cost_basis else 0.0
+
+        state["balance_sol"] += proceeds
+        state["closed_trades"].append({
+            "mint": mint, "pnl_sol": pnl, "pnl_pct": pnl_pct,
+            "signature": signature, "timestamp": time.time()
+        })
+        del state["positions"][mint]
+        save_state()
+
+    emoji = "✅" if pnl >= 0 else "❌"
+    send_telegram_message(
+        f"🔴 <b>PAPER SELL</b> {emoji}\n"
+        f"Token: <code>{short_mint(mint)}</code>\n"
+        f"P&L: {pnl:+.4f} SOL ({pnl_pct:+.1f}%)\n"
+        f"Balance: {state['balance_sol']:.3f} SOL\n"
+        f"Tx: <code>{signature}</code>"
+    )
+
+# ------------------------------------------------------------------
+# 8. HELIUS WALLET WATCHER (εντοπίζει pump.fun trades του στοχευμένου wallet)
+# ------------------------------------------------------------------
+def fetch_new_transactions(until_signature):
+    url = f"https://api.helius.xyz/v0/addresses/{WATCHED_WALLET}/transactions"
+    params = {"api-key": HELIUS_API_KEY, "limit": 25}
+    if until_signature:
+        params["until"] = until_signature
+    res = requests.get(url, params=params, timeout=15)
+    res.raise_for_status()
+    txs = res.json() or []
+    return list(reversed(txs))  # παλιότερο -> νεότερο
+
+def process_transaction(tx):
+    try:
+        signature = tx.get("signature")
+        source = tx.get("source", "")
+        involves_pumpfun = (
+            source in ("PUMP_FUN", "PUMP_AMM")
+            or PUMP_FUN_PROGRAM_ID in json.dumps(tx.get("instructions", []))
+        )
+        if not involves_pumpfun:
+            return
+
+        token_transfers = tx.get("tokenTransfers", []) or []
+        native_transfers = tx.get("nativeTransfers", []) or []
+
+        for tt in token_transfers:
+            mint = tt.get("mint")
+            amount = tt.get("tokenAmount")
+            if not mint or not amount:
+                continue
+            if tt.get("toUserAccount") == WATCHED_WALLET:
+                sol_spent = sum(
+                    nt["amount"] for nt in native_transfers
+                    if nt.get("fromUserAccount") == WATCHED_WALLET
+                ) / 1e9
+                paper_buy(mint, amount, sol_spent, signature)
+            elif tt.get("fromUserAccount") == WATCHED_WALLET:
+                sol_received = sum(
+                    nt["amount"] for nt in native_transfers
+                    if nt.get("toUserAccount") == WATCHED_WALLET
+                ) / 1e9
+                paper_sell(mint, amount, sol_received, signature)
+    except Exception as e:
+        print(f"Tx parse error: {e}")
+
+def wallet_watcher_loop():
+    if not (HELIUS_API_KEY and WATCHED_WALLET):
+        print("HELIUS_API_KEY ή WATCHED_WALLET λείπουν - watcher ανενεργός.")
+        return
+
+    print("Wallet watcher loop active...")
+    if state["last_signature"] is None:
+        # Πρώτη εκκίνηση: μην επεξεργαστείς παλιό ιστορικό, πάρε μόνο baseline
+        try:
+            txs = fetch_new_transactions(None)
+            if txs:
+                state["last_signature"] = txs[-1]["signature"]
+                save_state()
+        except Exception as e:
+            print(f"Baseline fetch error: {e}")
+
+    while True:
+        try:
+            txs = fetch_new_transactions(state["last_signature"])
+            for tx in txs:
+                process_transaction(tx)
+                state["last_signature"] = tx["signature"]
+            if txs:
+                save_state()
+        except Exception as e:
+            print(f"Watcher loop error: {e}")
+        time.sleep(5)
+
+# ------------------------------------------------------------------
+# 9. TELEGRAM COMMANDS + AI ANALYSIS
+# ------------------------------------------------------------------
+def handle_command(text):
+    cmd = text.strip().lower()
+
+    if cmd == "/start":
+        send_telegram_message(
+            "🤖 <b>Pump.fun Paper Copy-Trader Online!</b>\n\n"
+            f"Παρακολουθώ wallet: <code>{short_mint(WATCHED_WALLET)}</code>\n"
+            f"Virtual balance: {state['balance_sol']:.3f} SOL\n\n"
+            "Εντολές: /status /positions /pnl /reset\n"
+            "Ή γράψε οτιδήποτε για AI ανάλυση."
+        )
+
+    elif cmd == "/status":
+        send_telegram_message(
+            f"📊 <b>Status</b>\n"
+            f"Wallet: <code>{short_mint(WATCHED_WALLET)}</code>\n"
+            f"Balance: {state['balance_sol']:.3f} SOL\n"
+            f"Ανοιχτές θέσεις: {len(state['positions'])}\n"
+            f"Κλειστές θέσεις: {len(state['closed_trades'])}"
+        )
+
+    elif cmd == "/positions":
+        if not state["positions"]:
+            send_telegram_message("Καμία ανοιχτή θέση αυτή τη στιγμή.")
+            return
+        lines = ["📈 <b>Ανοιχτές Θέσεις</b>\n"]
+        for mint, pos in state["positions"].items():
+            current_price = get_current_price_sol(mint)
+            line = f"• {short_mint(mint)}: {pos['amount']:.2f} tokens @ {pos['avg_price_sol']:.8f} SOL"
+            if current_price:
+                unreal_pnl = (current_price - pos['avg_price_sol']) * pos['amount']
+                pct = (current_price / pos['avg_price_sol'] - 1) * 100 if pos['avg_price_sol'] else 0
+                line += f"\n  Τρέχουσα: {current_price:.8f} | P&L: {unreal_pnl:+.4f} SOL ({pct:+.1f}%)"
+            lines.append(line)
+        send_telegram_message("\n".join(lines))
+
+    elif cmd == "/pnl":
+        realized = sum(t["pnl_sol"] for t in state["closed_trades"])
+        wins = sum(1 for t in state["closed_trades"] if t["pnl_sol"] > 0)
+        total = len(state["closed_trades"])
+        winrate = (wins / total * 100) if total else 0
+        send_telegram_message(
+            f"💰 <b>P&L Summary</b>\n"
+            f"Πραγματοποιημένο P&L: {realized:+.4f} SOL\n"
+            f"Κλειστές θέσεις: {total} (Win rate: {winrate:.0f}%)\n"
+            f"Balance: {state['balance_sol']:.3f} SOL "
+            f"(ξεκίνησε από {STARTING_BALANCE_SOL:.3f})"
+        )
+
+    elif cmd == "/reset":
+        with state_lock:
+            state["balance_sol"] = STARTING_BALANCE_SOL
+            state["positions"] = {}
+            state["closed_trades"] = []
+            save_state()
+        send_telegram_message(f"🔄 Το paper account έγινε reset. Balance: {STARTING_BALANCE_SOL:.3f} SOL")
+
+    else:
+        # Οτιδήποτε άλλο -> Gemini AI ανάλυση
+        if ai_client:
+            try:
+                response_ai = ai_client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=text,
+                )
+                send_telegram_message(response_ai.text)
+            except Exception as ai_err:
+                send_telegram_message(f"⚠️ Σφάλμα AI: {ai_err}")
+        else:
+            send_telegram_message("⚠️ Το GEMINI_API_KEY δεν έχει ρυθμιστεί.")
+
+def telegram_polling_loop():
+    clear_telegram_webhooks()
+    last_update_id = 0
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    print("Telegram Listener loop active...")
+
+    while True:
+        try:
+            params = {"offset": last_update_id + 1, "timeout": 20}
+            response = requests.get(url, params=params, timeout=25)
+
+            if response.status_code == 200:
+                data = response.json()
+                for update in data.get("result", []):
+                    last_update_id = update["update_id"]
+                    message = update.get("message", {})
+                    text = message.get("text", "")
+                    sender_id = str(message.get("chat", {}).get("id", ""))
+                    print(f"DEBUG: got message '{text}' from chat_id={sender_id} (expected {TELEGRAM_CHAT_ID})")
+
+                    if TELEGRAM_CHAT_ID and sender_id == str(TELEGRAM_CHAT_ID) and text:
+                        handle_command(text)
+                    else:
+                        print("DEBUG: message ignored - chat_id mismatch or empty CHAT_ID/text")
+            else:
+                print(f"Telegram API Status Code: {response.status_code}")
+        except Exception as e:
+            print(f"Telegram listener error: {e}")
+        time.sleep(2)
+
+# ------------------------------------------------------------------
+# 10. MAIN ENTRY POINT
+# ------------------------------------------------------------------
+if __name__ == "__main__":
+    Thread(target=telegram_polling_loop, daemon=True).start()
+    Thread(target=wallet_watcher_loop, daemon=True).start()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
